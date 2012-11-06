@@ -15,6 +15,8 @@ public class Driver {
    */
   public static void main(String[] args) throws Throwable {
     ProgramDriver pgd = new ProgramDriver();
+    pgd.addClass(ImportFromMySQL.NAME, ImportFromMySQL.class,
+      "Import from Database MySQL");
     pgd.addClass(ImportFromFile.NAME, ImportFromFile.class,
       "Import from file");
     pgd.addClass(AnalyzeData.NAME, AnalyzeData.class,
