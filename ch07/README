@@ -1,0 +1,6 @@
+Example usage ImportFromMySQL :
+
+```
+export HADOOP_CLASSPATH=/usr/lib/hbase/hbase.jar:/usr/share/java/mysql.jar:target/hbase-book-ch07-1.0.jar 
+hadoop mapreduce.ImportFromMySQL -libjars /usr/lib/hbase/hbase.jar,/usr/share/java/mysql.jar -c toto:test -i employees -t toto
+```
