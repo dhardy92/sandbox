@@ -14,13 +14,13 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.HBaseConfiguration;
 import org.apache.hadoop.hbase.KeyValue;
 import org.apache.hadoop.hbase.client.Put;
+import org.apache.hadoop.hbase.client.Increment;
 import org.apache.hadoop.hbase.io.ImmutableBytesWritable;
 import org.apache.hadoop.hbase.mapreduce.TableOutputFormat;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.io.LongWritable;
 import org.apache.hadoop.io.Text;
 import org.apache.hadoop.io.Writable;
-
 import org.apache.hadoop.mapreduce.Job;
 import org.apache.hadoop.mapreduce.Mapper;
 import org.apache.hadoop.mapreduce.lib.db.DBConfiguration;
@@ -29,6 +29,7 @@ import org.apache.hadoop.mapred.lib.db.DBWritable;
 import org.apache.hadoop.filecache.DistributedCache;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.util.GenericOptionsParser;
+import org.apache.hadoop.hbase.util.MD5Hash;
 import org.apache.log4j.Level;
 import org.apache.log4j.Logger;
 
@@ -56,10 +57,8 @@ public class ImportFromMySQL {
    */
   // vv ImportFromMySQL
   static class ImportMapper
-  extends Mapper<LongWritable, MyRecord, ImmutableBytesWritable, Writable> {
+  extends Mapper<LongWritable, ConsulProfileEntry, ImmutableBytesWritable, Writable> {
 
-    private byte[] family = null;
-    private byte[] qualifier = null;
 
     // ^^ ImportFromMySQL
     /**
@@ -73,12 +72,6 @@ public class ImportFromMySQL {
     @Override
     protected void setup(Context context)
       throws IOException, InterruptedException {
-      String column = context.getConfiguration().get("conf.column");
-      byte[][] colkey = KeyValue.parseColumn(Bytes.toBytes(column));
-      family = colkey[0];
-      if (colkey.length > 1) {
-        qualifier = colkey[1];
-      }
     }
 
     // ^^ ImportFromMySQL
@@ -92,14 +85,19 @@ public class ImportFromMySQL {
      */
     // vv ImportFromMySQL
     @Override
-    public void map(LongWritable offset, MyRecord line, Context context) // co ImportFromMySQL-3-Map The map() function transforms the key/value provided by the InputFormat to what is needed by the OutputFormat.
+    public void map(LongWritable offset, ConsulProfileEntry cp, Context context) // co ImportFromMySQL-3-Map The map() function transforms the key/value provided by the InputFormat to what is needed by the OutputFormat.
     throws IOException {
       try {
-        String name = line.name.toString();
-        byte[] rowkey = Bytes.toBytes(line.id);; // co ImportFromMySQL-4-RowKey The row key is the MD5 hash of the line to generate a random key. TODO: Change Rowkey
-        Put put = new Put(rowkey);
-        put.add(family, qualifier, Bytes.toBytes(name)); // co ImportFromMySQL-5-Put Store the original data in a column in the given table.
-        context.write(new ImmutableBytesWritable(rowkey), put);
+        //insert cell for visited and for visitor rowkey = "md5(userid)-userid"
+        byte[] rowkeyl = Bytes.add(Bytes.toBytes(MD5Hash.getMD5AsHex(Bytes.toBytes(cp.LookMemberID))), Bytes.toBytes("-"), Bytes.toBytes(cp.SeenMemberID));
+        byte[] rowkeys = Bytes.add(Bytes.toBytes(MD5Hash.getMD5AsHex(Bytes.toBytes(cp.SeenMemberID))), Bytes.toBytes("-"), Bytes.toBytes(cp.SeenMemberID));
+        Put putl = new Put(rowkeyl);
+        Put puts = new Put(rowkeys);
+        putl.add(Bytes.toBytes("visiting_tl"), Bytes.add(Bytes.toBytes(Long.MAX_VALUE - cp.ConsultationDate.getTime()), Bytes.toBytes(cp.SeenMemberID)), Bytes.toBytes(cp.TypeConsultation));
+        puts.add(Bytes.toBytes("visited_tl"), Bytes.add(Bytes.toBytes(Long.MAX_VALUE - cp.ConsultationDate.getTime()), Bytes.toBytes(cp.LookMemberID)), Bytes.toBytes(cp.TypeConsultation));
+        context.write(new ImmutableBytesWritable(rowkeyl), putl);
+        context.write(new ImmutableBytesWritable(rowkeys), puts);
+        //inc num of MySQL tupple managed
         context.getCounter(Counters.LINES).increment(1);
       } catch (Exception e) {
         e.printStackTrace();
@@ -118,22 +116,37 @@ public class ImportFromMySQL {
   // vv ImportFromMySQL
   private static CommandLine parseArgs(String[] args) throws ParseException { // co ImportFromMySQL-6-ParseArgs Parse the command line parameters using the Apache Commons CLI classes. These are already part of HBase and therefore are handy to process the job specific parameters.
     Options options = new Options();
-    Option o = new Option("t", "table", true,
-      "table to import into (must exist)");
-    o.setArgName("table-name");
+    Option o = new Option("s", "stable", true,
+      "MySQL table to import from");
+    o.setArgName("MySQL-table-name");
     o.setRequired(true);
     options.addOption(o);
-    o = new Option("c", "column", true,
-      "column to store row data into (must exist)");
-    o.setArgName("family:qualifier");
+    o = new Option("b", "database", true,
+      "MySQL Database where is to import from");
+    o.setArgName("database");
     o.setRequired(true);
     options.addOption(o);
-    o = new Option("i", "input", true,
-      "the directory or file to read from");
-    o.setArgName("path-in-HDFS");
+    o = new Option("d", "dtable", true,
+      "HBase table to import to (must exists)");
+    o.setArgName("HBase-table");
     o.setRequired(true);
     options.addOption(o);
-    options.addOption("d", "debug", false, "switch on DEBUG log level");
+    o = new Option("h", "host", true,
+      "MySQL host");
+    o.setArgName("localhost");
+    o.setRequired(true);
+    options.addOption(o);
+    o = new Option("u", "user", true,
+      "MySQL user");
+    o.setArgName("user");
+    o.setRequired(true);
+    options.addOption(o);
+    o = new Option("p", "password", true,
+      "MySQL password");
+    o.setArgName("password");
+    o.setRequired(true);
+    options.addOption(o);
+
     CommandLineParser parser = new PosixParser();
     CommandLine cmd = null;
     try {
@@ -143,11 +156,6 @@ public class ImportFromMySQL {
       HelpFormatter formatter = new HelpFormatter();
       formatter.printHelp(NAME + " ", options, true);
       System.exit(-1);
-    }
-    // ^^ ImportFromMySQL
-    if (cmd.hasOption("d")) {
-      Logger log = Logger.getLogger("mapreduce");
-      log.setLevel(Level.DEBUG);
     }
     // vv ImportFromMySQL
     return cmd;
@@ -171,52 +179,75 @@ public class ImportFromMySQL {
     if (cmd.hasOption("d")) conf.set("conf.debug", "true");
     // get details
     // vv ImportFromMySQL
-    String table = cmd.getOptionValue("t");
-    String input = cmd.getOptionValue("i");
-    String column = cmd.getOptionValue("c");
-    conf.set("conf.column", column);
-    DBConfiguration.configureDB(conf,"com.mysql.jdbc.Driver","jdbc:mysql://localhost/mydatabase?user=root&password=toto");
+    String stable = cmd.getOptionValue("s");
+    String database = cmd.getOptionValue("b");
+    String dtable = cmd.getOptionValue("d");
+    String host = cmd.getOptionValue("h");
+    String user = cmd.getOptionValue("u");
+    String password = cmd.getOptionValue("p");
+    DBConfiguration.configureDB(conf,"com.mysql.jdbc.Driver","jdbc:mysql://"+ host + "/" + database + "?user=" + user + "&password=" + password);
+    conf.setInt("mapred.map.tasks", 12);
 
-    Job job = Job.getInstance(conf, "Import from file " + input + " into table " + table); // co ImportFromMySQL-8-JobDef Define the job with the required classes.
+    Job job = Job.getInstance(conf, "Import from file " + stable + " into table " + dtable); // co ImportFromMySQL-8-JobDef Define the job with the required classes.
     job.setJarByClass(ImportFromMySQL.class);
     job.setMapperClass(ImportMapper.class);
     job.setOutputFormatClass(TableOutputFormat.class);
     job.setInputFormatClass(DataDrivenDBInputFormat.class);
-    job.getConfiguration().set(TableOutputFormat.OUTPUT_TABLE, table);
+    job.getConfiguration().set(TableOutputFormat.OUTPUT_TABLE, dtable);
     job.setOutputKeyClass(ImmutableBytesWritable.class);
     job.setOutputValueClass(Writable.class);
     job.setNumReduceTasks(0); // co ImportFromMySQL-9-MapOnly This is a map only job, therefore tell the framework to bypass the reduce step.
-    DataDrivenDBInputFormat.setInput(job, MyRecord.class, input, "" /* conditions */,  "employee_id",  "employee_id", "name");
+    DataDrivenDBInputFormat.setInput(job, ConsulProfileEntry.class, stable, "" /* conditions */,  "LookMemberID",  "LookMemberID", "SeenMemberID", "ConsultationDate", "Visible", "Referer", "TypeConsultation");
     System.exit(job.waitForCompletion(true) ? 0 : 1);
   }
 
 
-  static class MyRecord implements Writable, DBWritable {
+  static class ConsulProfileEntry implements Writable, DBWritable {
     
-    long id;
-    String name;
+    long LookMemberID;
+    long SeenMemberID;
+    Timestamp ConsultationDate;
+    boolean Visible;
+    String Referer;
+    int TypeConsultation;
 
-    public MyRecord () {}
+    public ConsulProfileEntry () {}
   
     public void readFields(DataInput in) throws IOException {
-      this.id = in.readLong();
-      this.name = Text.readString(in);
+      this.LookMemberID = in.readLong();
+      this.SeenMemberID = in.readLong();
+      this.ConsultationDate.setTime(in.readLong());
+      this.Visible = in.readBoolean();
+      this.Referer = in.readUTF();
+      this.TypeConsultation = in.readInt();
     }
   
-    public void readFields(ResultSet resultSet)
-        throws SQLException {
-      this.id = resultSet.getLong(1);
-      this.name = resultSet.getString(2);
+    public void readFields(ResultSet resultSet) throws SQLException {
+      this.LookMemberID = resultSet.getLong(1);
+      this.SeenMemberID = resultSet.getLong(2);
+      this.ConsultationDate = resultSet.getTimestamp(3);
+      this.Visible = resultSet.getBoolean(4);
+      this.Referer = resultSet.getString(5);
+      this.TypeConsultation = resultSet.getInt(6);
+      
     }
   
     public void write(DataOutput out) throws IOException {
-      out.writeLong(this.id);
-      Text.writeString(out, this.name);
+      out.writeLong(this.LookMemberID);
+      out.writeLong(this.SeenMemberID);
+      out.writeLong(this.ConsultationDate.getTime());
+      out.writeBoolean(this.Visible);
+      Text.writeString(out,this.Referer);
+      out.writeInt(TypeConsultation);
     }
   
     public void write(PreparedStatement stmt) throws SQLException {
-      stmt.setLong(1, this.id);
-      stmt.setString(2, this.name);
+      stmt.setObject(1, this.LookMemberID);
+      stmt.setObject(2, this.SeenMemberID);
+      stmt.setObject(3, this.ConsultationDate);
+      stmt.setObject(4, this.Visible);
+      stmt.setObject(5, this.Referer);
+      stmt.setObject(6, this.TypeConsultation);
     }
   }
 }
