@@ -17,12 +17,15 @@ import org.apache.hadoop.hbase.client.Put;
 import org.apache.hadoop.hbase.client.Increment;
 import org.apache.hadoop.hbase.io.ImmutableBytesWritable;
 import org.apache.hadoop.hbase.mapreduce.TableOutputFormat;
+import org.apache.hadoop.hbase.KeyValue;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.io.LongWritable;
 import org.apache.hadoop.io.Text;
 import org.apache.hadoop.io.Writable;
 import org.apache.hadoop.mapreduce.Job;
 import org.apache.hadoop.mapreduce.Mapper;
+import org.apache.hadoop.mapreduce.Reducer;
+import org.apache.hadoop.hbase.mapreduce.TableReducer;
 import org.apache.hadoop.mapreduce.lib.db.DBConfiguration;
 import org.apache.hadoop.mapreduce.lib.db.DataDrivenDBInputFormat;
 import org.apache.hadoop.mapred.lib.db.DBWritable;
@@ -49,18 +52,20 @@ public class ImportFromMySQL {
   // vv ImportFromMySQL
   public static final String NAME = "ImportFromMySQL"; // co ImportFromMySQL-1-Name Define a job name for later use.
   public enum Counters { LINES };
+  public static byte[] SEP = Bytes.toBytes("-");
+  public static byte[] CF_VISITED = Bytes.toBytes("visited_tl");
+  public static byte[] CF_VISITING = Bytes.toBytes("visiting_tl");
+  public static byte[] CF_COUNTER = Bytes.toBytes("visits_count");
+  public static byte[] QA_COUNTER = Bytes.toBytes("_counter");
 
-  // ^^ ImportFromMySQL
   /**
    * Implements the <code>Mapper</code> that takes the lines from the input
    * and outputs <code>Put</code> instances.
    */
-  // vv ImportFromMySQL
   static class ImportMapper
-  extends Mapper<LongWritable, ConsulProfileEntry, ImmutableBytesWritable, Writable> {
+  extends Mapper<LongWritable, ConsulProfileEntry, ImmutableBytesWritable, KeyValue> {
 
 
-    // ^^ ImportFromMySQL
     /**
      * Prepares the column family and qualifier.
      *
@@ -68,35 +73,32 @@ public class ImportFromMySQL {
      * @throws IOException When an operation fails - not possible here.
      * @throws InterruptedException When the task is aborted.
      */
-    // vv ImportFromMySQL
     @Override
     protected void setup(Context context)
       throws IOException, InterruptedException {
     }
 
-    // ^^ ImportFromMySQL
     /**
      * Maps the input.
      *
      * @param offset The current offset into the input file.
-     * @param line The current line of the file.
+     * @param cp The current tupple from MySQL.
      * @param context The task context.
      * @throws IOException When mapping the input fails.
      */
-    // vv ImportFromMySQL
     @Override
     public void map(LongWritable offset, ConsulProfileEntry cp, Context context) // co ImportFromMySQL-3-Map The map() function transforms the key/value provided by the InputFormat to what is needed by the OutputFormat.
     throws IOException {
       try {
         //insert cell for visited and for visitor rowkey = "md5(userid)-userid"
-        byte[] rowkeyl = Bytes.add(Bytes.toBytes(MD5Hash.getMD5AsHex(Bytes.toBytes(cp.LookMemberID))), Bytes.toBytes("-"), Bytes.toBytes(cp.SeenMemberID));
-        byte[] rowkeys = Bytes.add(Bytes.toBytes(MD5Hash.getMD5AsHex(Bytes.toBytes(cp.SeenMemberID))), Bytes.toBytes("-"), Bytes.toBytes(cp.SeenMemberID));
-        Put putl = new Put(rowkeyl);
-        Put puts = new Put(rowkeys);
-        putl.add(Bytes.toBytes("visiting_tl"), Bytes.add(Bytes.toBytes(Long.MAX_VALUE - cp.ConsultationDate.getTime()), Bytes.toBytes(cp.SeenMemberID)), Bytes.toBytes(cp.TypeConsultation));
-        puts.add(Bytes.toBytes("visited_tl"), Bytes.add(Bytes.toBytes(Long.MAX_VALUE - cp.ConsultationDate.getTime()), Bytes.toBytes(cp.LookMemberID)), Bytes.toBytes(cp.TypeConsultation));
-        context.write(new ImmutableBytesWritable(rowkeyl), putl);
-        context.write(new ImmutableBytesWritable(rowkeys), puts);
+        byte[] rowkeyl = Bytes.add(Bytes.toBytes(MD5Hash.getMD5AsHex(cp.LookMemberID)), SEP, cp.LookMemberID);
+        byte[] rowkeys = Bytes.add(Bytes.toBytes(MD5Hash.getMD5AsHex(cp.SeenMemberID)), SEP, cp.SeenMemberID);
+        KeyValue kl = new KeyValue(rowkeyl, CF_VISITING, Bytes.add( cp.ConsultationDate, cp.SeenMemberID ), Bytes.toLong(cp.ConsultationDate), cp.TypeConsultation );
+        context.write(new ImmutableBytesWritable(rowkeyl), kl);
+        if (Bytes.toBoolean(cp.Visible) ) {
+          KeyValue ks = new KeyValue(rowkeys, CF_VISITED, Bytes.add( cp.ConsultationDate, cp.LookMemberID ), Bytes.toLong(cp.ConsultationDate), cp.TypeConsultation );
+          context.write(new ImmutableBytesWritable(rowkeys), ks);
+        }
         //inc num of MySQL tupple managed
         context.getCounter(Counters.LINES).increment(1);
       } catch (Exception e) {
@@ -105,6 +107,19 @@ public class ImportFromMySQL {
     }
   }
 
+  static class ImportReducer
+  extends TableReducer<ImmutableBytesWritable, KeyValue, ImmutableBytesWritable> {
+    protected void reduce(ImmutableBytesWritable row, Iterable<KeyValue> kvs, Reducer<ImmutableBytesWritable, KeyValue, ImmutableBytesWritable, Put>.Context context)
+    throws java.io.IOException, InterruptedException {
+      Put p = new Put(row.copyBytes());
+      for (KeyValue kv: kvs) {
+        p.add(kv);
+      }
+      context.write(row,p);
+    }
+  }
+
+  
   // ^^ ImportFromMySQL
   /**
    * Parse the command line parameters.
@@ -143,6 +158,12 @@ public class ImportFromMySQL {
     options.addOption(o);
     o = new Option("p", "password", true,
       "MySQL password");
+    o.setArgName("password");
+    o.setRequired(true);
+    options.addOption(o);
+    options.addOption(o);
+    o = new Option("m", "12", true,
+      "number of Map tasks");
     o.setArgName("password");
     o.setRequired(true);
     options.addOption(o);
@@ -185,70 +206,65 @@ public class ImportFromMySQL {
     String host = cmd.getOptionValue("h");
     String user = cmd.getOptionValue("u");
     String password = cmd.getOptionValue("p");
+    String mtasks = cmd.getOptionValue("m");
     DBConfiguration.configureDB(conf,"com.mysql.jdbc.Driver","jdbc:mysql://"+ host + "/" + database + "?user=" + user + "&password=" + password);
-    conf.setInt("mapred.map.tasks", 12);
+    conf.setInt("mapred.map.tasks", Integer.parseInt(mtasks));
 
     Job job = Job.getInstance(conf, "Import from file " + stable + " into table " + dtable); // co ImportFromMySQL-8-JobDef Define the job with the required classes.
     job.setJarByClass(ImportFromMySQL.class);
     job.setMapperClass(ImportMapper.class);
+    job.setReducerClass(ImportReducer.class);
     job.setOutputFormatClass(TableOutputFormat.class);
     job.setInputFormatClass(DataDrivenDBInputFormat.class);
     job.getConfiguration().set(TableOutputFormat.OUTPUT_TABLE, dtable);
     job.setOutputKeyClass(ImmutableBytesWritable.class);
-    job.setOutputValueClass(Writable.class);
-    job.setNumReduceTasks(0); // co ImportFromMySQL-9-MapOnly This is a map only job, therefore tell the framework to bypass the reduce step.
-    DataDrivenDBInputFormat.setInput(job, ConsulProfileEntry.class, stable, "" /* conditions */,  "LookMemberID",  "LookMemberID", "SeenMemberID", "ConsultationDate", "Visible", "Referer", "TypeConsultation");
+    job.setOutputValueClass(KeyValue.class);
+    job.setNumReduceTasks(12);
+    DataDrivenDBInputFormat.setInput(job, ConsulProfileEntry.class, stable, "" /* conditions */,  "LookMemberID",  "LookMemberID", "SeenMemberID", "ConsultationDate", "Visible", "TypeConsultation");
     System.exit(job.waitForCompletion(true) ? 0 : 1);
   }
 
-
   static class ConsulProfileEntry implements Writable, DBWritable {
     
-    long LookMemberID;
-    long SeenMemberID;
-    Timestamp ConsultationDate;
-    boolean Visible;
-    String Referer;
-    int TypeConsultation;
+    byte[] LookMemberID;
+    byte[] SeenMemberID;
+    byte[] ConsultationDate;
+    byte[] Visible;
+    byte[] TypeConsultation;
 
     public ConsulProfileEntry () {}
   
     public void readFields(DataInput in) throws IOException {
-      this.LookMemberID = in.readLong();
-      this.SeenMemberID = in.readLong();
-      this.ConsultationDate.setTime(in.readLong());
-      this.Visible = in.readBoolean();
-      this.Referer = in.readUTF();
-      this.TypeConsultation = in.readInt();
+      this.LookMemberID = Bytes.toBytes(in.readLong());
+      this.SeenMemberID = Bytes.toBytes(in.readLong());
+      this.ConsultationDate = Bytes.toBytes(Long.MAX_VALUE - in.readLong());
+      this.Visible = Bytes.toBytes(in.readBoolean());
+      this.TypeConsultation = Bytes.toBytes(in.readInt());
     }
   
     public void readFields(ResultSet resultSet) throws SQLException {
-      this.LookMemberID = resultSet.getLong(1);
-      this.SeenMemberID = resultSet.getLong(2);
-      this.ConsultationDate = resultSet.getTimestamp(3);
-      this.Visible = resultSet.getBoolean(4);
-      this.Referer = resultSet.getString(5);
-      this.TypeConsultation = resultSet.getInt(6);
+      this.LookMemberID = Bytes.toBytes(resultSet.getLong(1));
+      this.SeenMemberID = Bytes.toBytes(resultSet.getLong(2));
+      this.ConsultationDate = Bytes.toBytes(Long.MAX_VALUE - resultSet.getTimestamp(3).getTime());
+      this.Visible = Bytes.toBytes(resultSet.getBoolean(4));
+      this.TypeConsultation = Bytes.toBytes(resultSet.getInt(5));
       
     }
   
     public void write(DataOutput out) throws IOException {
-      out.writeLong(this.LookMemberID);
-      out.writeLong(this.SeenMemberID);
-      out.writeLong(this.ConsultationDate.getTime());
-      out.writeBoolean(this.Visible);
-      Text.writeString(out,this.Referer);
-      out.writeInt(TypeConsultation);
+      out.writeLong(Bytes.toLong(this.LookMemberID));
+      out.writeLong(Bytes.toLong(this.SeenMemberID));
+      out.writeLong(Long.MAX_VALUE - Bytes.toLong(this.ConsultationDate));
+      out.writeBoolean(Bytes.toBoolean(this.Visible));
+      out.writeInt(Bytes.toInt(TypeConsultation));
     }
   
     public void write(PreparedStatement stmt) throws SQLException {
-      stmt.setObject(1, this.LookMemberID);
-      stmt.setObject(2, this.SeenMemberID);
-      stmt.setObject(3, this.ConsultationDate);
-      stmt.setObject(4, this.Visible);
-      stmt.setObject(5, this.Referer);
-      stmt.setObject(6, this.TypeConsultation);
+      stmt.setObject(1, Bytes.toLong(this.LookMemberID));
+      stmt.setObject(2, Bytes.toLong(this.SeenMemberID));
+      stmt.setObject(3, new Timestamp(Long.MAX_VALUE - Bytes.toLong(this.ConsultationDate)));
+      stmt.setObject(4, Bytes.toBoolean(this.Visible));
+      stmt.setObject(5, Bytes.toInt(this.TypeConsultation));
     }
   }
 }
-// ^^ ImportFromMySQL
