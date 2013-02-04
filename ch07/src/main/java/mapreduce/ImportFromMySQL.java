@@ -158,9 +158,9 @@ public class ImportFromMySQL {
     o.setRequired(true);
     options.addOption(o);
     options.addOption(o);
-    o = new Option("m", "12", true,
+    o = new Option("m", "mappers", true,
       "number of Map tasks");
-    o.setArgName("password");
+    o.setArgName("mappers");
     o.setRequired(true);
     options.addOption(o);
 
